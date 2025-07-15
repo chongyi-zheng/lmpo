@@ -63,10 +63,10 @@ def main():
             for num_steps in [150]:
                 for inference_batch_per_device in [32]:
                     for ppo_minibatch in [64]:
-                        for entropy_coef in [0.001, 0.0]:
+                        for entropy_coef in [0.0001, 0.0]:
                             exp_name = f"{datetime.today().strftime('%Y%m%d')}_grpo_env_name={env_name}_num_steps={num_steps}_inference_batch_per_device={inference_batch_per_device}_ppo_minibatch={ppo_minibatch}_entropy_coef={entropy_coef}"
                             log_dir = os.path.expanduser(
-                                f"{log_root_dir}/exp_logs/skill_collaboration_logs/tiny_grpo/{exp_name}/")
+                                f"{log_root_dir}/exp_logs/jax_llm_logs/grpo/{exp_name}/")
 
                             # change the log folder of slurm executor
                             submitit_log_dir = os.path.join(os.path.dirname(log_dir), 'submitit')
@@ -101,6 +101,7 @@ def main():
                                     --inference_batch_per_device={inference_batch_per_device} \
                                     --num_steps={num_steps} \
                                     --ppo_minibatch={ppo_minibatch} \
+                                    --entropy_coef={entropy_coef} \
                                     --save_dir={log_dir} \
                                 2>&1 | tee {log_dir}/stream.log;
         
