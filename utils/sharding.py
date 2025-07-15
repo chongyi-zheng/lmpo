@@ -1,9 +1,10 @@
 from jax.experimental import mesh_utils
 from jax.sharding import Mesh, PartitionSpec, NamedSharding
 import jax
-import jax.numpy as jnp
+
 import flax
 import numpy as np
+
 
 def create_sharding(shard_type, train_state_shape=None):
     device_mesh = mesh_utils.create_device_mesh((jax.device_count(),))
@@ -30,10 +31,9 @@ def create_sharding(shard_type, train_state_shape=None):
             
             # idx = np.argsort(shape)[::-1]
             idx = np.arange(len(shape))
-            # This is neccessary to prevent numerical sharding issues. I cannot explain why.
+            # This is necessary to prevent numerical sharding issues. I cannot explain why.
             # But if params are sharded as (None, 'device'), it causes issues when doing
             # input @ params, when input is sharded with ['devices', None].
-
 
             for i in idx:
                 if shape[i] % jax.device_count() == 0:
@@ -65,6 +65,7 @@ def create_sharding(shard_type, train_state_shape=None):
     # The first three are 'Sharding' objects which are pytrees.
     # The last two are helper functions for moving data between devices.
     return train_state_sharding, no_shard, data_sharding, shard_data
+
 
 def host_gather(x):
     is_multi_host = len(jax.local_devices()) != len(jax.devices())

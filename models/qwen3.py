@@ -2,6 +2,7 @@
 Model structure for Qwen3. Taken from https://github.com/jax-ml/jax-llm-examples/blob/main/qwen3/qwen3_jax/model.py.
 """
 
+import os
 import json
 import glob
 from safetensors import safe_open
@@ -12,7 +13,6 @@ import jax.numpy as jnp
 import flax
 
 import flax.linen as nn
-import jax.numpy as jnp
 
 def rms_norm(x, gamma, eps):
     rms = jnp.sqrt(jnp.mean(jnp.astype(x, jnp.float32) ** 2, axis=-1, keepdims=True) + eps)
@@ -274,7 +274,7 @@ def create_model_from_hf(hf_dir: str):
 
 def create_model_from_ckpt(ckpt_dir: str):
     from utils.checkpoint import Checkpoint
-    with open(ckpt_dir + "config.json") as f:
+    with open(os.path.join(ckpt_dir, "config.json")) as f:
         cfg = json.load(f)
     model = Qwen3Model(
         hidden_size=cfg['hidden_size'],
@@ -287,7 +287,7 @@ def create_model_from_ckpt(ckpt_dir: str):
         eps=cfg['rms_norm_eps'],
         rope_theta=cfg['rope_theta']
     )
-    ckpt = Checkpoint(ckpt_dir + "params.pkl", parallel=False)
+    ckpt = Checkpoint(os.path.join(ckpt_dir, "params.pkl"), parallel=False)
     params = ckpt.load_as_dict()['params']
         
     return model, params

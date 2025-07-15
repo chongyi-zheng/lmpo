@@ -6,12 +6,12 @@ import ml_collections
 import sys
 from absl import app, flags
 
-from lmpo.models.qwen3 import create_model_from_ckpt
-from lmpo.utils.configs import define_flag_dict
-from lmpo.envs.env_creator import create_env
-from lmpo.utils.sharding import create_sharding, host_gather
-from lmpo.models.tokenizer import create_tokenizer
-from lmpo.core.sampling import pad_and_collate, autoregressive_sample
+from models.qwen3 import create_model_from_ckpt
+from utils.configs import define_flag_dict
+from envs.env_creator import create_env
+from utils.sharding import create_sharding, host_gather
+from models.tokenizer import create_tokenizer
+from core.sampling import pad_and_collate, autoregressive_sample
 
 def eval_model(model, params, env, 
                num_generation_tokens,

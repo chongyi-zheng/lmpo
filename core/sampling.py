@@ -5,7 +5,7 @@ import numpy as np
 import jax
 from functools import partial
 
-from lmpo.utils.sharding import host_gather
+from utils.sharding import host_gather
 
 def pad_and_collate(token_batch: list, pad_id: int = 0, force_length: int = None):
     max_len = max([len(x) for x in token_batch])
@@ -84,9 +84,9 @@ def autoregressive_sample(model: Qwen3Model, params, prompt_tokens, num_generati
 ##################################################
 if __name__ == "__main__":
     import argparse
-    from lmpo.models.qwen3 import create_model_from_ckpt
-    from lmpo.utils.sharding import create_sharding, host_gather
-    from lmpo.models.tokenizer import create_tokenizer
+    from models.qwen3 import create_model_from_ckpt
+    from utils.sharding import create_sharding, host_gather
+    from models.tokenizer import create_tokenizer
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--ckpt_dir', type=str, default='/nfs/gcs/jaxconverted/Qwen3-0.6B/')

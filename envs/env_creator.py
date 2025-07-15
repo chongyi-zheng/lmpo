@@ -1,9 +1,10 @@
 
-from lmpo.envs.poem_length import PoemLengthEnv
-from lmpo.envs.gsm8k import GSM8KEnv
-from lmpo.envs.countdown import CountdownEnv
-from lmpo.envs.deepscaler import DeepscalerEnv
-from lmpo.envs.aime import AimeEnv
+from envs.poem_length import PoemLengthEnv
+from envs.gsm8k import GSM8KEnv
+from envs.countdown import CountdownEnv
+from envs.deepscaler import DeepscalerEnv
+from envs.aime import AimeEnv
+
 
 def create_env(env_name, tokenizer):
     env_name = env_name.lower()

@@ -1,3 +1,4 @@
+import os
 import jax.numpy as jnp
 import jax
 import numpy as np
@@ -9,49 +10,51 @@ import ml_collections
 import sys
 import time
 import shutil
-from absl import app, flags
+from absl import flags
 
 try: # If you like to use these helpers, you can.
     from jax.experimental.compilation_cache import compilation_cache as cc
-    cc.set_cache_dir('/nfs/jax-cache')
+    cc.set_cache_dir('/scratch/gpfs/cz8792/jax_cache')  # (chongyi): change me
     from localutils.debugger import enable_debug
     enable_debug()
 except:
     pass
 
-from lmpo.models.qwen3 import create_model_from_ckpt
-from lmpo.utils.configs import define_flag_dict
-from lmpo.utils.wandb import setup_wandb
-from lmpo.envs.env_creator import create_env
-from lmpo.utils.sharding import create_sharding, host_gather
-from lmpo.utils.train_state import TrainState
-from lmpo.models.tokenizer import create_tokenizer
-from lmpo.utils.checkpoint import Checkpoint
-from lmpo.core.sampling import pad_and_collate, autoregressive_sample
-from lmpo.core.eval import eval_model
+from models.qwen3 import create_model_from_ckpt
+from utils.configs import define_flag_dict
+from utils.wandb import setup_wandb
+from envs.env_creator import create_env
+from utils.sharding import create_sharding, host_gather
+from utils.train_state import TrainState
+from models.tokenizer import create_tokenizer
+from utils.checkpoint import Checkpoint
+from core.sampling import pad_and_collate, autoregressive_sample
+from core.eval import eval_model
 
 config = ml_collections.ConfigDict({
-    'wandb_project': "lmpo",
+    'wandb_project': 'lmpo',
     'wandb_name': 'lmpo-run',
+    'wandb_offline': 1,
     'model_dir': '/nfs/gcs/jaxconverted/Qwen3-1.7B/',
-    'save_dir': "",
+    'save_dir': '',
     'save_interval': 20,
     # env settings.
-    'env_name': 'poem', # (poem, gsm8k, countdown)
-    'num_generation_tokens': -1, # -1 = use default from env.
+    'env_name': 'poem',  # (poem, gsm8k, countdown)
+    'num_generation_tokens': -1,  # -1 = use default from env.
     'prompt_length': 256,
-    'force_answer_at': -1, # -1 = use default from env.
+    'force_answer_at': -1,  # -1 = use default from env.
     'test_env_name': '',
     'test_interval': 10,
     # sampling settings.
-    'inference_batch_per_device': 4, # Set this to the maximum until OOM. Should not affect results.
+    'inference_batch_per_device': 4,  # Set this to the maximum until OOM. Should not affect results.
     # training settings.
-    'groups_per_batch': 64, # global batch = groups_per_batch * group_size
+    'num_steps': 150,
+    'groups_per_batch': 64,  # global batch = groups_per_batch * group_size
     'ppo_minibatch': 64,
-    'group_size': 8, # GRPO group size.
+    'group_size': 8,  # GRPO group size.
     'do_group_normalization': 1,
     'do_global_normalization': 0,
-    'do_group_filter': 1, # Filter for groups with all advantages == 0.
+    'do_group_filter': 1,  # Filter for groups with all advantages == 0.
     'lr': 1e-6,
     'clip_epsilon': 0.2,
     'entropy_coef': 0.001,
@@ -60,7 +63,12 @@ define_flag_dict(config)
 FLAGS = flags.FLAGS
 FLAGS(sys.argv)
 if jax.process_index() == 0:
-    setup_wandb(FLAGS.flag_values_dict(), project=FLAGS.wandb_project, name=FLAGS.env_name+'-'+FLAGS.wandb_name)
+    os.makedirs(FLAGS.save_dir, exist_ok=True)
+    setup_wandb(FLAGS.flag_values_dict(),
+                wandb_output_dir=FLAGS.save_dir,
+                project=FLAGS.wandb_project,
+                name=FLAGS.env_name+'-'+FLAGS.wandb_name,
+                offline=FLAGS.wandb_offline)
     rollouts_list = []
 
 host_id = jax.process_index()
@@ -132,7 +140,7 @@ def update(train_state: TrainState, token_batch, mask, advantages, old_logprobs)
         cross_entropy = avg_over_mask(-token_logprobs)
 
         loss_pg = jnp.mean(pg_loss * mask)
-        loss_ent = -jnp.mean(entropy_avg * mask) * FLAGS.entropy_coef
+        loss_ent = -jnp.mean(entropy * mask) * FLAGS.entropy_coef
         loss = loss_pg + loss_ent
         return loss, {
             'loss': loss,
@@ -170,8 +178,7 @@ assert rollout_batch_size % FLAGS.group_size == 0
 rng = jax.random.PRNGKey(jax.process_index())
 total_rollouts = 0
 
-for i in tqdm.tqdm(range(10000)):
-
+for i in tqdm.tqdm(range(FLAGS.num_steps)):
     # Fill this global on-policy buffer with groups that have A != 0.
     buffer_tokens = []
     buffer_logprobs = []
@@ -197,7 +204,7 @@ for i in tqdm.tqdm(range(10000)):
         num_generation_tokens = FLAGS.num_generation_tokens
         rng, key = jax.random.split(rng)
         action_tokens = autoregressive_sample(
-            train_state.model_def, train_state.params, prompt_tokens, rng=key, num_generation_tokens=num_generation_tokens, 
+            train_state.model_def, train_state.params, prompt_tokens, rng=key, num_generation_tokens=num_generation_tokens,
             pad_id=pad_id, data_shard=data_shard, no_shard=no_shard, force_answer_at=FLAGS.force_answer_at,
         )
         prompt_tokens = host_gather(prompt_tokens)
@@ -223,12 +230,12 @@ for i in tqdm.tqdm(range(10000)):
         returns = jnp.reshape(returns, (-1, FLAGS.group_size))
         advantages = returns
         if FLAGS.do_group_normalization:
-            group_mean = np.mean(advantages, axis=-1)
-            group_std = np.std(advantages, axis=-1) + 1e-8
+            group_mean = jnp.mean(advantages, axis=-1)
+            group_std = jnp.std(advantages, axis=-1) + 1e-8
             advantages = (advantages - group_mean[:, None]) / group_std[:, None]
         if FLAGS.do_global_normalization:
-            global_mean = np.mean(advantages)
-            global_std = np.std(advantages) + 1e-8
+            global_mean = jnp.mean(advantages)
+            global_std = jnp.std(advantages) + 1e-8
             advantages = (advantages - global_mean) / global_std
         advantages_grouped = advantages # [batch_size // group_size, group_size]
         all_tokens_grouped = all_tokens.reshape(-1, FLAGS.group_size, all_tokens.shape[-1])
@@ -290,9 +297,9 @@ for i in tqdm.tqdm(range(10000)):
             info['env_epochs'] = total_rollouts / env_num_tasks
         info['rollout_iters_per_update'] = num_rollout_iters
         info['global_step'] = i
-        info['time_per_rollout'] = rollout_total_time / (num_rollout_iters * rollout_batch_size * jax.host_count())
+        info['time_per_rollout'] = rollout_total_time / (num_rollout_iters * rollout_batch_size * jax.process_count())
         info['time_per_effective_rollout'] = rollout_total_time / global_batch_size
-        info['effective_rollout_ratio'] = global_batch_size / (rollout_batch_size * jax.host_count() * num_rollout_iters)
+        info['effective_rollout_ratio'] = global_batch_size / (rollout_batch_size * jax.process_count() * num_rollout_iters)
         info['minibatches_per_global_step'] = global_batch_size // FLAGS.ppo_minibatch
         for k, v in env_infos_history.items():
             info['env/'+k] = np.mean(v)
