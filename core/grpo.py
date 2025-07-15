@@ -140,7 +140,7 @@ def update(train_state: TrainState, token_batch, mask, advantages, old_logprobs)
         cross_entropy = avg_over_mask(-token_logprobs)
 
         loss_pg = jnp.mean(pg_loss * mask)
-        loss_ent = -jnp.mean(entropy * mask) * FLAGS.entropy_coef
+        loss_ent = -entropy_avg * FLAGS.entropy_coef
         loss = loss_pg + loss_ent
         return loss, {
             'loss': loss,
