@@ -9,11 +9,14 @@ from sympy import Symbol, symbols
 from sympy.parsing.sympy_parser import parse_expr
 
 SYSTEM_PROMPT = "You are a helpful assistant. You first think about the reasoning process in the mind, and then provide the user with the answer."
-USER_PROMPT = "Using the numbers {numbers}, create an equation that equals {target}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. Think for only ten sentences, then return the final answer in <answer> </answer> tags, for example <answer> (1 + 2) / 3 </answer>."
+USER_PROMPT = "Using the numbers {numbers}, create an equation that equals {target}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. You can follow the strategy in the <strategy> </strategy> tag. Show your work in <think> </think> tags. Think for only ten sentences, then return the final answer in <answer> </answer> tags, for example <answer> (1 + 2) / 3 </answer>. <strategy> {strategy} </strategy>"
+PROPOSER_SYSTEM_PROMPT = "You are a helpful assistant. You provide the user with the strategy."
+PROPOSER_USER_PROMPT = "Using the numbers {numbers}, create an equation that equals {target}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Given this question, come up with an strategy to solve this question. Show your work in <strategy> </strategy> tags. Provide one strategy for only five sentences."
 
 @dataclass(frozen=True)
 class CountdownState(BaseState):
     tokens: list
+    proposer_tokens: list
     numbers: list
     correct_answer: int
     rendered: str = ""
@@ -126,19 +129,26 @@ class CountdownEnv(BaseEnv):
         self.data_dict = {}
         self.tokenizer = tokenizer
 
-    def reset(self, idx):
+    def reset(self, idx, strategy=None):
         rng = np.random.RandomState(idx)
         _, numbers, target = generate_expression(rng)
         rng.shuffle(numbers)
         output_tokens = self.tokenizer.apply_chat_template([
                 {'role': 'system', 'content': SYSTEM_PROMPT},
-                {"role": "user", "content": USER_PROMPT.format(target=target, numbers=numbers)},
+                {'role': 'user', 'content': USER_PROMPT.format(target=target, numbers=numbers, strategy=strategy)},
             ],
             add_generation_prompt=True,
             enable_thinking=True
         )
-        state = CountdownState(tokens=output_tokens, numbers=numbers, correct_answer=target)
-        return state, output_tokens
+        proposer_tokens = self.tokenizer.apply_chat_template([
+                {'role': 'system', 'content': PROPOSER_SYSTEM_PROMPT},
+                {'role': 'user', 'content': PROPOSER_USER_PROMPT.format(target=target, numbers=numbers)},
+            ],
+            add_generation_prompt=True,
+            enable_strategy=True
+        )
+        state = CountdownState(tokens=output_tokens, proposer_tokens=proposer_tokens, numbers=numbers, correct_answer=target)
+        return state, output_tokens, proposer_tokens
 
     def render(self, state):
         return state.rendered

@@ -10,10 +10,13 @@ class Tokenizer():
     def __init__(self, hf_tokenizer):
         self.hf_tokenizer = hf_tokenizer
 
-    def apply_chat_template(self, messages, add_generation_prompt=False, enable_thinking=False):
-        toks = self.hf_tokenizer.apply_chat_template(messages, add_generation_prompt=add_generation_prompt, enable_thinking=enable_thinking)
+    def apply_chat_template(self, messages, add_generation_prompt=False, enable_thinking=False, enable_strategy=False):
+        toks = self.hf_tokenizer.apply_chat_template(messages, add_generation_prompt=add_generation_prompt,
+                                                     enable_thinking=enable_thinking or enable_strategy)
         if enable_thinking:
             toks += [151667] # <think>.
+        if enable_strategy:
+            toks += [27, 61914, 29]  # <strategy>.
         return toks
     
     def get_eos_token_id(self):
