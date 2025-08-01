@@ -21,6 +21,14 @@ class CountdownState(BaseState):
     correct_answer: int
     rendered: str = ""
 
+def extract_xml_strategy(text: str) -> str:
+    try:
+        strategy = text.split("</strategy>")[0]
+        return strategy
+    except:
+        return "Parsing error"
+
+
 def extract_xml_answer(text: str) -> str:
     try:
         answer = text.split("<answer>")[-1]
@@ -129,13 +137,13 @@ class CountdownEnv(BaseEnv):
         self.data_dict = {}
         self.tokenizer = tokenizer
 
-    def reset(self, idx, strategy=None):
+    def reset(self, idx):
         rng = np.random.RandomState(idx)
         _, numbers, target = generate_expression(rng)
         rng.shuffle(numbers)
         output_tokens = self.tokenizer.apply_chat_template([
                 {'role': 'system', 'content': SYSTEM_PROMPT},
-                {'role': 'user', 'content': USER_PROMPT.format(target=target, numbers=numbers, strategy=strategy)},
+                {'role': 'user', 'content': USER_PROMPT.format(target=target, numbers=numbers, strategy=None)},
             ],
             add_generation_prompt=True,
             enable_thinking=True

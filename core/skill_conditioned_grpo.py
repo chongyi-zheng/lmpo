@@ -24,21 +24,13 @@ from models.qwen3 import create_model_from_ckpt
 from utils.configs import define_flag_dict
 from utils.wandb import setup_wandb
 from envs.env_creator import create_env
+from envs.countdown import extract_xml_strategy
 from utils.sharding import create_sharding, host_gather
 from utils.train_state import TrainState
 from models.tokenizer import create_tokenizer
 from utils.checkpoint import Checkpoint
 from core.sampling import pad_and_collate, autoregressive_sample
-from core.eval import eval_model
-
-
-def extract_xml_strategy(text: str) -> str:
-    try:
-        answer = text.split("<strategy>")[-1]
-        answer = answer.split("</strategy>")[0]
-        return answer
-    except:
-        return "Parsing error"
+from core.eval import eval_proposer_model
 
 
 config = ml_collections.ConfigDict({
@@ -51,6 +43,7 @@ config = ml_collections.ConfigDict({
     # env settings.
     'env_name': 'poem',  # (poem, gsm8k, countdown)
     'num_generation_tokens': -1,  # -1 = use default from env.
+    'proposer_prompt_length': 256,
     'prompt_length': 256,
     'force_answer_at': -1,  # -1 = use default from env.
     'test_env_name': '',
@@ -58,7 +51,7 @@ config = ml_collections.ConfigDict({
     # sampling settings.
     'inference_batch_per_device': 4,  # Set this to the maximum until OOM. Should not affect results.
     # training settings.
-    'num_steps': 150,
+    'num_steps': 160,
     'groups_per_batch': 64,  # global batch = groups_per_batch * group_size
     'ppo_minibatch': 64,
     'group_size': 8,  # GRPO group size.
@@ -68,6 +61,7 @@ config = ml_collections.ConfigDict({
     'lr': 1e-6,
     'clip_epsilon': 0.2,
     'entropy_coef': 0.001,
+    'seed': 0,
 })
 define_flag_dict(config)
 FLAGS = flags.FLAGS
@@ -92,11 +86,24 @@ def main(_):
         optax.clip_by_global_norm(1.0),
         optax.adamw(FLAGS.lr, b1=0.9, b2=0.95, weight_decay=1e-2)
     )
-    rng = jax.random.PRNGKey(0)
+    rng = jax.random.PRNGKey(np.random.randint(2 ** 32))
     init_fn = partial(TrainState.create_with_params, model_def=proposer, tx=tx, use_ema=False)
     train_state_shape = jax.eval_shape(init_fn, rng=rng, params=proposer_params)
     train_state_shard, no_shard, data_shard, shard_data_fn = create_sharding('fsdp', train_state_shape)
     train_state = jax.jit(lambda r, p: init_fn(rng=r, params=p), out_shardings=train_state_shard)(rng, proposer_params)
+
+    # hacky code to shard the model
+    model_tx = optax.chain(
+        optax.clip_by_global_norm(1.0),
+        optax.adamw(FLAGS.lr, b1=0.9, b2=0.95, weight_decay=1e-2)
+    )
+    rng = jax.random.PRNGKey(np.random.randint(2 ** 32))
+    model_init_fn = partial(TrainState.create_with_params, model_def=model, tx=model_tx, use_ema=False)
+    model_train_state_shape = jax.eval_shape(model_init_fn, rng=rng, params=model_params)
+    model_train_state_shard, model_no_shard, model_data_shard, model_shard_data_fn = create_sharding(
+        'fsdp', model_train_state_shape)
+    model_train_state = jax.jit(lambda r, p: model_init_fn(rng=r, params=p), out_shardings=model_train_state_shard)(
+        rng, model_params)
 
     jax.debug.visualize_array_sharding(train_state.params['Block_0']['Dense_0']['kernel'])
     tokenizer = create_tokenizer(ckpt_dir)
@@ -109,7 +116,7 @@ def main(_):
         FLAGS.num_generation_tokens = env.tokens_per_action
     if FLAGS.force_answer_at == -1:
         FLAGS.force_answer_at = env.force_answer_at
-    np.random.seed(jax.process_index())
+    np.random.seed(FLAGS.seed + jax.process_index())
     env_num_tasks = env.num_tasks if env.num_tasks != -1 else 1000000
     env_task_idx = 0
 
@@ -119,7 +126,7 @@ def main(_):
         text_input, text_target = token_batch[:, :-1], token_batch[:, 1:]
         # mask = mask[:, 1:]
         token_mask = jnp.where(text_input != pad_id, 1, 0).astype(jnp.int32)
-        logits, _ = train_state.call_model(text_input, token_mask, cache=None)
+        logits, _, _ = train_state.call_model(text_input, token_mask, cache=None)
         logprobs = jax.nn.log_softmax(logits, axis=-1)  # [batch, time, vocab_size]
         logprobs = jnp.sum(logprobs * jax.nn.one_hot(text_target, logits.shape[-1]), axis=-1)
         return logprobs
@@ -131,7 +138,7 @@ def main(_):
         mask = mask[:, 1:]
         token_mask = jnp.where(text_input != pad_id, 1, 0).astype(jnp.int32)
         def loss_fn(grad_params):
-            logits, _ = train_state.call_model(text_input, token_mask, cache=None, params=grad_params)
+            logits, _, _ = train_state.call_model(text_input, token_mask, cache=None, params=grad_params)
             logprobs = jax.nn.log_softmax(logits) # [batch, time, vocab_size]
             token_logprobs = jnp.sum(logprobs * jax.nn.one_hot(text_target, logits.shape[-1]), axis=-1)
             entropy = -jnp.sum(jax.nn.softmax(logits) * logprobs, axis=-1)
@@ -189,7 +196,7 @@ def main(_):
 
     rollout_batch_size = jax.local_device_count() * FLAGS.inference_batch_per_device
     assert rollout_batch_size % FLAGS.group_size == 0
-    rng = jax.random.PRNGKey(jax.process_index())
+    rng = jax.random.PRNGKey(FLAGS.seed + jax.process_index())
     total_rollouts = 0
 
     for i in tqdm.tqdm(range(FLAGS.num_steps)):
@@ -214,7 +221,7 @@ def main(_):
                     env_tokens.append(output_tokens)
                     env_proposer_tokens.append(proposer_tokens)
 
-            proposer_prompt_tokens = pad_and_collate(env_proposer_tokens, pad_id=pad_id, force_length=FLAGS.prompt_length)
+            proposer_prompt_tokens = pad_and_collate(env_proposer_tokens, pad_id=pad_id, force_length=FLAGS.proposer_prompt_length)
             proposer_prompt_tokens = shard_data_fn(proposer_prompt_tokens)
             # prompt_tokens = pad_and_collate(env_tokens, pad_id=pad_id, force_length=FLAGS.prompt_length)
             # prompt_tokens = shard_data_fn(prompt_tokens)
@@ -237,27 +244,29 @@ def main(_):
                 proposer_action_msg = tokenizer.decode(cleaned_proposer_action_tokens)
                 strategy = extract_xml_strategy(proposer_action_msg)
 
-                env_tokens[idx] = env_tokens[idx].format(strategy=strategy)
+                env_msg = tokenizer.decode(env_tokens[idx])
+                env_msg = env_msg.replace("<strategy> None </strategy>",
+                                          "<strategy> {strategy} </strategy>".format(strategy=strategy))
+                env_tokens[idx] = tokenizer.encode(env_msg)
             prompt_tokens = pad_and_collate(env_tokens, pad_id=pad_id, force_length=FLAGS.prompt_length)
-            prompt_tokens = shard_data_fn(prompt_tokens)
+            prompt_tokens = model_shard_data_fn(prompt_tokens)
             # proposer_prompt_tokens = pad_and_collate(env_proposer_tokens, pad_id=pad_id, force_length=FLAGS.prompt_length)
             # proposer_prompt_tokens = shard_data_fn(proposer_prompt_tokens)
 
-            cleaned_proposer_action_tokens = [env.clean_action(t.tolist(), tokenizer.get_eos_token_id())
-                                              for t in proposer_action_tokens]
-            action_msg = tokenizer.decode(cleaned_proposer_action_tokens)
-
-            equation = extract_xml_answer(action_msg)
+            # cleaned_proposer_action_tokens = [env.clean_action(t.tolist(), tokenizer.get_eos_token_id())
+            #                                   for t in proposer_action_tokens]
+            # proposer_action_msg = tokenizer.decode(cleaned_proposer_action_tokens)
+            # strategy = extract_xml_strategy(proposer_action_msg)
+            # equation = extract_xml_answer(action_msg)
 
             # eos_idx = np.array([len(t) - 1 for t in cleaned_proposer_action_tokens])
             # eos_idx = host_gather(shard_data_fn(eos_idx))
             # proposer_embeddings = proposer_embeddings[jnp.arange(proposer_embeddings.shape[0]), eos_idx]
 
             action_tokens, _ = autoregressive_sample(
-                model, model_params, prompt_tokens,
-                rng=model_key, latents=proposer_embeddings,
-                num_generation_tokens=num_generation_tokens,
-                pad_id=pad_id, data_shard=data_shard, no_shard=no_shard,
+                model_train_state.model_def, model_train_state.params, prompt_tokens,
+                rng=model_key, num_generation_tokens=num_generation_tokens,
+                pad_id=pad_id, data_shard=model_data_shard, no_shard=model_no_shard,
                 force_answer_at=FLAGS.force_answer_at,
             )
             prompt_tokens = host_gather(prompt_tokens)
@@ -289,7 +298,7 @@ def main(_):
                 global_mean = jnp.mean(advantages)
                 global_std = jnp.std(advantages) + 1e-8
                 advantages = (advantages - global_mean) / global_std
-            advantages_grouped = advantages # [batch_size // group_size, group_size]
+            advantages_grouped = advantages  # [batch_size // group_size, group_size]
             proposer_all_tokens_grouped = proposer_all_tokens.reshape(
                 -1, FLAGS.group_size, proposer_all_tokens.shape[-1])
 
@@ -368,18 +377,25 @@ def main(_):
                 wandb.log(info)
 
         if i % FLAGS.test_interval == 0 and env_test is not None:
-            _, test_env_history = eval_model(
-                model=train_state.model_def,
-                params=train_state.params,
+            _, test_env_history = eval_proposer_model(
+                proposer=train_state.model_def,
+                proposer_params=train_state.params,
+                model=model_train_state.model_def,
+                params=model_train_state.params,
                 env=env_test,
+                tokenizer=tokenizer,
                 num_generation_tokens=FLAGS.num_generation_tokens,
                 force_answer_at=FLAGS.force_answer_at,
+                proposer_prompt_length=FLAGS.proposer_prompt_length,
                 prompt_length=FLAGS.prompt_length,
                 inference_batch_per_device=FLAGS.inference_batch_per_device,
                 pad_id=pad_id,
                 shard_data_fn=shard_data_fn,
                 no_shard=no_shard,
                 data_shard=data_shard,
+                model_shard_data_fn=model_shard_data_fn,
+                model_no_shard=model_no_shard,
+                model_data_shard=model_data_shard,
                 num_epochs=1,
             )
             test_info = {f'test_env/{k}': np.mean(v) for k, v in test_env_history.items()}
