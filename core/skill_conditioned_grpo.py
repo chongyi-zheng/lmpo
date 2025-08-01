@@ -45,7 +45,7 @@ config = ml_collections.ConfigDict({
     'env_name': 'poem',  # (poem, gsm8k, countdown)
     'num_generation_tokens': -1,  # -1 = use default from env.
     'proposer_prompt_length': 256,
-    'prompt_length': 400,
+    'prompt_length': 300,
     'force_answer_at': -1,  # -1 = use default from env.
     'test_env_name': '',
     'test_interval': 10,

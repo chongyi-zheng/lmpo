@@ -90,9 +90,8 @@ def main():
                                     export PATH="$PATH":"$CONDA_PREFIX"/bin;
                                     export CUDA_VISIBLE_DEVICES=0,1,2,3;
                                     source $HOME/env_vars.sh;
-                                    XLA_PYTHON_CLIENT_MEM_FRACTION=.90;
+                                    XLA_PYTHON_CLIENT_MEM_FRACTION=.95;
                                     
-            
                                     rm -rf {log_dir};
                                     mkdir -p {log_dir};
                                     python $PROJECT_DIR/core/skill_conditioned_grpo.py \

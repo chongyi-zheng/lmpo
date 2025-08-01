@@ -58,6 +58,7 @@ config = ml_collections.ConfigDict({
     'lr': 1e-6,
     'clip_epsilon': 0.2,
     'entropy_coef': 0.001,
+    'seed': 0,
 })
 define_flag_dict(config)
 FLAGS = flags.FLAGS
@@ -79,7 +80,7 @@ tx = optax.chain(
     optax.clip_by_global_norm(1.0),
     optax.adamw(FLAGS.lr, b1=0.9, b2=0.95, weight_decay=1e-2)
 )
-rng = jax.random.PRNGKey(0)
+rng = jax.random.PRNGKey(np.random.randint(2 ** 32))
 init_fn = partial(TrainState.create_with_params, model_def=model, tx=tx, use_ema=False)
 train_state_shape = jax.eval_shape(init_fn, rng=rng, params=params)
 train_state_shard, no_shard, data_shard, shard_data_fn = create_sharding('fsdp', train_state_shape)
@@ -96,7 +97,7 @@ if FLAGS.num_generation_tokens == -1:
     FLAGS.num_generation_tokens = env.tokens_per_action
 if FLAGS.force_answer_at == -1:
     FLAGS.force_answer_at = env.force_answer_at
-np.random.seed(jax.process_index())
+np.random.seed(FLAGS.seed + jax.process_index())
 env_num_tasks = env.num_tasks if env.num_tasks != -1 else 1000000
 env_task_idx = 0
 
@@ -106,7 +107,7 @@ def get_logprobs(train_state: TrainState, token_batch, mask):
     text_input, text_target = token_batch[:, :-1], token_batch[:, 1:]
     mask = mask[:, 1:]
     token_mask = jnp.where(text_input != pad_id, 1, 0).astype(jnp.int32)
-    logits, _ = train_state.call_model(text_input, token_mask, cache=None)
+    logits, _, _ = train_state.call_model(text_input, token_mask, cache=None)
     logprobs = jax.nn.log_softmax(logits, axis=-1) # [batch, time, vocab_size]
     logprobs = jnp.sum(logprobs * jax.nn.one_hot(text_target, logits.shape[-1]), axis=-1)
     return logprobs
@@ -118,7 +119,7 @@ def update(train_state: TrainState, token_batch, mask, advantages, old_logprobs)
     mask = mask[:, 1:]
     token_mask = jnp.where(text_input != pad_id, 1, 0).astype(jnp.int32)
     def loss_fn(grad_params):
-        logits, _ = train_state.call_model(text_input, token_mask, cache=None, params=grad_params)
+        logits, _, _ = train_state.call_model(text_input, token_mask, cache=None, params=grad_params)
         logprobs = jax.nn.log_softmax(logits) # [batch, time, vocab_size]
         token_logprobs = jnp.sum(logprobs * jax.nn.one_hot(text_target, logits.shape[-1]), axis=-1)
         entropy = -jnp.sum(jax.nn.softmax(logits) * logprobs, axis=-1)
@@ -175,7 +176,7 @@ def update(train_state: TrainState, token_batch, mask, advantages, old_logprobs)
 
 rollout_batch_size = jax.local_device_count() * FLAGS.inference_batch_per_device
 assert rollout_batch_size % FLAGS.group_size == 0
-rng = jax.random.PRNGKey(jax.process_index())
+rng = jax.random.PRNGKey(FLAGS.seed + jax.process_index())
 total_rollouts = 0
 
 for i in tqdm.tqdm(range(FLAGS.num_steps)):
