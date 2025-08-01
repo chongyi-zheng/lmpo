@@ -1,8 +1,8 @@
-import jax.numpy as jnp
 import jax
 import numpy as np
 import tqdm
 import ml_collections
+from dataclasses import replace
 import sys
 from absl import flags
 
@@ -131,10 +131,12 @@ def eval_proposer_model(proposer, proposer_params,
             env_msg = tokenizer.decode(env_tokens[idx])
             env_msg = env_msg.replace("<strategy> None </strategy>",
                                       "<strategy> {strategy} </strategy>".format(strategy=strategy))
-            env_tokens[idx] = tokenizer.encode(env_msg)
+            new_env_tokens = tokenizer.encode(env_msg)
+            env_tokens[idx] = new_env_tokens
+            env_states[idx] = replace(env_states[idx], tokens=new_env_tokens)
         prompt_tokens = pad_and_collate(env_tokens, pad_id=pad_id, force_length=prompt_length)
         prompt_tokens = model_shard_data_fn(prompt_tokens)
-        action_tokens = autoregressive_sample(
+        action_tokens, _ = autoregressive_sample(
             model, params, prompt_tokens,
             rng=model_key, num_generation_tokens=num_generation_tokens,
             pad_id=pad_id, data_shard=model_data_shard, no_shard=model_no_shard,

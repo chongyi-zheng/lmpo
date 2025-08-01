@@ -4,6 +4,7 @@ import jax
 import numpy as np
 import tqdm
 import optax
+from dataclasses import replace
 from functools import partial
 import wandb
 import ml_collections
@@ -44,7 +45,7 @@ config = ml_collections.ConfigDict({
     'env_name': 'poem',  # (poem, gsm8k, countdown)
     'num_generation_tokens': -1,  # -1 = use default from env.
     'proposer_prompt_length': 256,
-    'prompt_length': 256,
+    'prompt_length': 400,
     'force_answer_at': -1,  # -1 = use default from env.
     'test_env_name': '',
     'test_interval': 10,
@@ -247,7 +248,9 @@ def main(_):
                 env_msg = tokenizer.decode(env_tokens[idx])
                 env_msg = env_msg.replace("<strategy> None </strategy>",
                                           "<strategy> {strategy} </strategy>".format(strategy=strategy))
-                env_tokens[idx] = tokenizer.encode(env_msg)
+                new_env_tokens = tokenizer.encode(env_msg)
+                env_tokens[idx] = new_env_tokens
+                env_states[idx] = replace(env_states[idx], tokens=new_env_tokens)
             prompt_tokens = pad_and_collate(env_tokens, pad_id=pad_id, force_length=FLAGS.prompt_length)
             prompt_tokens = model_shard_data_fn(prompt_tokens)
             # proposer_prompt_tokens = pad_and_collate(env_proposer_tokens, pad_id=pad_id, force_length=FLAGS.prompt_length)

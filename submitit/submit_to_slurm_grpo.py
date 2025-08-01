@@ -60,64 +60,65 @@ def main():
 
     with executor.batch():  # job array
         for env_name in ['countdown']:
-            for num_steps in [150]:
-                for inference_batch_per_device in [32]:
-                    for ppo_minibatch in [64]:
-                        for entropy_coef in [0.001, 0.0001, 0.0]:
-                            exp_name = f"{datetime.today().strftime('%Y%m%d')}_grpo_env_name={env_name}_num_steps={num_steps}_inference_batch_per_device={inference_batch_per_device}_ppo_minibatch={ppo_minibatch}_entropy_coef={entropy_coef}"
-                            log_dir = os.path.expanduser(
-                                f"{log_root_dir}/exp_logs/jax_llm_logs/grpo/{exp_name}/")
+            for num_steps in [160]:
+                for inference_batch_per_device in [72]:
+                    for ppo_minibatch in [16]:  # 64
+                        for entropy_coef in [0.001]:
+                            for seed in [10, 20]:
+                                exp_name = f"{datetime.today().strftime('%Y%m%d')}_grpo_env_name={env_name}_num_steps={num_steps}_inference_batch_per_device={inference_batch_per_device}_ppo_minibatch={ppo_minibatch}_entropy_coef={entropy_coef}"
+                                log_dir = os.path.expanduser(
+                                    f"{log_root_dir}/exp_logs/jax_llm_logs/grpo/{exp_name}/{seed}")
 
-                            # change the log folder of slurm executor
-                            submitit_log_dir = os.path.join(os.path.dirname(log_dir), 'submitit')
-                            executor._executor.folder = Path(
-                                submitit_log_dir).expanduser().absolute()
+                                # change the log folder of slurm executor
+                                submitit_log_dir = os.path.join(os.path.dirname(log_dir), 'submitit')
+                                executor._executor.folder = Path(
+                                    submitit_log_dir).expanduser().absolute()
 
-                            cmds = f"""
-                                unset PYTHONPATH;
-                                source $HOME/.zshrc;
-                                conda activate jax_llm;
-                                which python;
-                                echo $CONDA_PREFIX;
-        
-                                echo job_id: $SLURM_ARRAY_JOB_ID;
-                                echo task_id: $SLURM_ARRAY_TASK_ID;
-                                squeue -j $SLURM_JOB_ID -o "%.18i %.9P %.8j %.8u %.2t %.6D %.5C %.11m %.11l %.12N";
-        
-                                export PROJECT_DIR=$PWD;
-                                export PYTHONPATH=$HOME/research/lmpo;
-                                export PATH="$PATH":"$CONDA_PREFIX"/bin;
-                                export CUDA_VISIBLE_DEVICES=0,1,2,3;
-                                source $HOME/env_vars.sh;
-                                XLA_PYTHON_CLIENT_MEM_FRACTION=.90;
-                                
-        
-                                rm -rf {log_dir};
-                                mkdir -p {log_dir};
-                                python $PROJECT_DIR/core/grpo.py \
-                                    --env_name={env_name} \
-                                    --test_env_name={env_name} \
-                                    --model_dir=/scratch/gpfs/cz8792/language_models/models/Qwen--Qwen3-1.7B/jax_ckpts/ \
-                                    --inference_batch_per_device={inference_batch_per_device} \
-                                    --num_steps={num_steps} \
-                                    --ppo_minibatch={ppo_minibatch} \
-                                    --entropy_coef={entropy_coef} \
-                                    --save_dir={log_dir} \
-                                2>&1 | tee {log_dir}/stream.log;
-        
-                                export SUBMITIT_RECORD_FILENAME={log_dir}/submitit_"$SLURM_ARRAY_JOB_ID"_"$SLURM_ARRAY_TASK_ID".txt;
-                                echo "{submitit_log_dir}/"$SLURM_ARRAY_JOB_ID"_"$SLURM_ARRAY_TASK_ID"_submitted.pkl" >> "$SUBMITIT_RECORD_FILENAME";
-                                echo "{submitit_log_dir}/"$SLURM_ARRAY_JOB_ID"_submission.sh" >> "$SUBMITIT_RECORD_FILENAME";
-                                echo "{submitit_log_dir}/"$SLURM_ARRAY_JOB_ID"_"$SLURM_ARRAY_TASK_ID"_0_log.out" >> "$SUBMITIT_RECORD_FILENAME";
-                                echo "{submitit_log_dir}/"$SLURM_ARRAY_JOB_ID"_"$SLURM_ARRAY_TASK_ID"_0_result.pkl" >> "$SUBMITIT_RECORD_FILENAME";
-                            """
+                                cmds = f"""
+                                    unset PYTHONPATH;
+                                    source $HOME/.zshrc;
+                                    conda activate jax_llm;
+                                    which python;
+                                    echo $CONDA_PREFIX;
+            
+                                    echo job_id: $SLURM_ARRAY_JOB_ID;
+                                    echo task_id: $SLURM_ARRAY_TASK_ID;
+                                    squeue -j $SLURM_JOB_ID -o "%.18i %.9P %.8j %.8u %.2t %.6D %.5C %.11m %.11l %.12N";
+            
+                                    export PROJECT_DIR=$PWD;
+                                    export PYTHONPATH=$HOME/research/lmpo;
+                                    export PATH="$PATH":"$CONDA_PREFIX"/bin;
+                                    export CUDA_VISIBLE_DEVICES=0,1,2,3;
+                                    source $HOME/env_vars.sh;
+                                    XLA_PYTHON_CLIENT_MEM_FRACTION=.90;
+                                    
+                                    rm -rf {log_dir};
+                                    mkdir -p {log_dir};
+                                    python $PROJECT_DIR/core/grpo.py \
+                                        --env_name={env_name} \
+                                        --test_env_name={env_name} \
+                                        --model_dir=/scratch/gpfs/cz8792/language_models/models/Qwen--Qwen3-1.7B/jax_ckpts/ \
+                                        --inference_batch_per_device={inference_batch_per_device} \
+                                        --num_steps={num_steps} \
+                                        --ppo_minibatch={ppo_minibatch} \
+                                        --entropy_coef={entropy_coef} \
+                                        --save_dir={log_dir} \
+                                        --seed={seed} \
+                                    2>&1 | tee {log_dir}/stream.log;
+            
+                                    export SUBMITIT_RECORD_FILENAME={log_dir}/submitit_"$SLURM_ARRAY_JOB_ID"_"$SLURM_ARRAY_TASK_ID".txt;
+                                    echo "{submitit_log_dir}/"$SLURM_ARRAY_JOB_ID"_"$SLURM_ARRAY_TASK_ID"_submitted.pkl" >> "$SUBMITIT_RECORD_FILENAME";
+                                    echo "{submitit_log_dir}/"$SLURM_ARRAY_JOB_ID"_submission.sh" >> "$SUBMITIT_RECORD_FILENAME";
+                                    echo "{submitit_log_dir}/"$SLURM_ARRAY_JOB_ID"_"$SLURM_ARRAY_TASK_ID"_0_log.out" >> "$SUBMITIT_RECORD_FILENAME";
+                                    echo "{submitit_log_dir}/"$SLURM_ARRAY_JOB_ID"_"$SLURM_ARRAY_TASK_ID"_0_result.pkl" >> "$SUBMITIT_RECORD_FILENAME";
+                                """
 
-                            cmd_func = submitit.helpers.CommandFunction([
-                                "/bin/zsh", "-c",
-                                cmds,
-                            ], verbose=True)
+                                cmd_func = submitit.helpers.CommandFunction([
+                                    "/bin/zsh", "-c",
+                                    cmds,
+                                ], verbose=True)
 
-                            executor.submit(cmd_func)
+                                executor.submit(cmd_func)
 
 
 if __name__ == "__main__":
