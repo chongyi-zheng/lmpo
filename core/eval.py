@@ -15,7 +15,9 @@ from models.tokenizer import create_tokenizer
 from core.sampling import pad_and_collate, autoregressive_sample
 
 
-def eval_model(model, params, env, 
+def eval_model(model, params,
+               env,
+               tokenizer,
                num_generation_tokens,
                force_answer_at,
                prompt_length,
@@ -40,17 +42,26 @@ def eval_model(model, params, env,
     for i in tqdm.tqdm(range(total_num_tasks // global_batch_size + 1)):
         env_states, env_tokens = [], []
         for _ in range(rollout_batch_size):
-            env_state, output_tokens = env.reset(min(env_task_idx + jax.process_index(), env_num_tasks-1))
+            env_state, output_tokens, _ = env.reset(min(env_task_idx + jax.process_index(), env_num_tasks-1))
             env_task_idx += jax.process_count()
             env_task_idx = env_task_idx % env_num_tasks
-            env_states.append(env_state)
-            env_tokens.append(output_tokens)
+
+            # env_states.append(env_state)
+            # env_tokens.append(output_tokens)
+
+            env_msg = tokenizer.decode(output_tokens)
+            env_msg = env_msg.replace("<strategy> None </strategy>", "")
+            new_env_tokens = tokenizer.encode(env_msg)
+            new_env_state = replace(env_state, tokens=new_env_tokens)
+
+            env_states.append(new_env_state)
+            env_tokens.append(new_env_tokens)
 
         prompt_tokens = pad_and_collate(env_tokens, pad_id=pad_id, force_length=prompt_length)
         prompt_tokens = shard_data_fn(prompt_tokens)
         num_generation_tokens = num_generation_tokens
         rng, key = jax.random.split(rng)
-        action_tokens = autoregressive_sample(
+        action_tokens, _ = autoregressive_sample(
             model, params, prompt_tokens, rng=key, num_generation_tokens=num_generation_tokens,
             pad_id=pad_id, data_shard=data_shard, no_shard=no_shard, force_answer_at=force_answer_at,
         )
