@@ -168,10 +168,17 @@ class Qwen3Model(nn.Module):
     eps: float = 1e-6
 
     @nn.compact
-    def __call__(self, x, token_mask, cache = None):
+    def __call__(self, x, token_mask, latents=None, cache=None):
         x = nn.Embed(num_embeddings=self.vocab_size, features=self.hidden_size)(x)
         x = x.astype(jnp.bfloat16)
-        positions = get_positions(token_mask)
+        if latents is not None:
+            latents = latents.astype(jnp.bfloat16)
+            latents = latents[:, None]
+            combined_token_mask = jnp.concatenate([jnp.ones_like(token_mask)[:, [0]], token_mask], axis=1)
+            x = jnp.concatenate([latents, x], axis=1)  # x is left padding
+        else:
+            combined_token_mask = token_mask
+        positions = get_positions(combined_token_mask)
         if cache is not None:
             start_indices = jnp.where(cache.length != 0, cache.length - cache.starts, 0)
         else:
@@ -180,7 +187,7 @@ class Qwen3Model(nn.Module):
         sin, cos = generate_pos_embeddings(positions, self.head_dim, self.rope_theta)
         sin, cos = sin.astype(jnp.bfloat16), cos.astype(jnp.bfloat16)
         for layer_id in range(self.num_layers):
-            x, k, v = Block(hidden_size=self.hidden_size, q_heads=self.q_heads, kv_heads=self.kv_heads, head_dim=self.head_dim, mlp_ffw_size=self.mlp_ffw_size, eps=self.eps)(x, sin, cos, token_mask, layer_id, cache)
+            x, k, v = Block(hidden_size=self.hidden_size, q_heads=self.q_heads, kv_heads=self.kv_heads, head_dim=self.head_dim, mlp_ffw_size=self.mlp_ffw_size, eps=self.eps)(x, sin, cos, combined_token_mask, layer_id, cache)
             if cache is not None:
                 cache.k[layer_id] = k
                 cache.v[layer_id] = v
@@ -190,9 +197,9 @@ class Qwen3Model(nn.Module):
         logits = nn.Dense(self.vocab_size, use_bias=False)(x)
 
         if cache is not None:
-            cache = cache.replace(length=cache.length + jnp.max(length_minus_padding(token_mask)))
+            cache = cache.replace(length=cache.length + jnp.max(length_minus_padding(combined_token_mask)))
 
-        return logits, cache
+        return logits, x, cache
     
 ###############################
 ##### Utils for loading models.

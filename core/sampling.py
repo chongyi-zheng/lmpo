@@ -18,7 +18,7 @@ def pad_and_collate(token_batch: list, pad_id: int = 0, force_length: int = None
     return np.array([(max_len - len(x)) * [pad_id] + x for x in token_batch])
 
 model_apply = None # Global variable to cache the JIT-compiled model application function.
-def autoregressive_sample(model: Qwen3Model, params, prompt_tokens, num_generation_tokens, rng, temp=1, pad_id=0, data_shard=None, no_shard=None, force_answer_at=-1):
+def autoregressive_sample(model: Qwen3Model, params, prompt_tokens, num_generation_tokens, rng, latents=None, temp=1, pad_id=0, data_shard=None, no_shard=None, force_answer_at=-1):
     """
     Samples tokens autoregressively, and can batch for performance.
     Args:
@@ -36,21 +36,23 @@ def autoregressive_sample(model: Qwen3Model, params, prompt_tokens, num_generati
     cache = jax.jit(lambda x: x, out_shardings=cache_sharding)(cache)
 
     if model_apply is None:
-        @partial(jax.jit, out_shardings=(data_shard, cache_sharding))
-        def model_apply(params, tokens, token_mask, cache):
+        @partial(jax.jit, out_shardings=(data_shard, data_shard, cache_sharding))
+        def model_apply(params, tokens, token_mask, latents, cache):
             print("JIT compiling sampling for tokens of shape", tokens.shape)
-            return model.apply({'params': params}, tokens, token_mask, cache=cache)
+            return model.apply({'params': params}, tokens, token_mask, latents=latents, cache=cache)
 
     # Fill cache with the prompt tokens.
-    _, cache = model_apply(params, prompt_tokens[:, :-1], token_mask[:, :-1], cache=cache)
+    _, _, cache = model_apply(params, prompt_tokens[:, :-1], token_mask[:, :-1], latents=latents, cache=cache)
     sampled_token = prompt_tokens[:, -1]  # Start with the last token of the prompt.
     tokens_list = []
+    hiddens_list = []
 
     max_samples = max_seq_len - prompt_tokens.shape[-1]
     for i in range(max_samples):
         next_token_mask = jnp.ones(sampled_token.shape, dtype=jnp.int32)
-        logits, cache = model_apply(params, sampled_token[:, None], next_token_mask[:, None], cache=cache)
-        logits = logits[:, 0, :]
+        logits, hiddens, cache = model_apply(params, sampled_token[:, None], next_token_mask[:, None], latents=latents, cache=cache)
+        logits = logits[:, -1, :]
+        hiddens = hiddens[:, -1, :]
         key, rng = jax.random.split(rng)
         if temp == 0:
             sampled_token = jnp.argmax(logits, axis=-1)
@@ -72,9 +74,11 @@ def autoregressive_sample(model: Qwen3Model, params, prompt_tokens, num_generati
                 sampled_token = jnp.ones_like(sampled_token) * 29 # />
 
         tokens_list.append(sampled_token)
+        hiddens_list.append(hiddens)
 
-    tokens = jnp.stack(tokens_list, axis=-1) # [batch, time]
-    return tokens
+    tokens = jnp.stack(tokens_list, axis=1) # [batch, time]
+    hiddens = jnp.stack(hiddens_list, axis=1) # [batch, time, embedding_dim]
+    return tokens, hiddens
 
 
 
