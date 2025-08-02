@@ -61,8 +61,8 @@ def main():
     with executor.batch():  # job array
         for env_name in ['countdown']:
             for num_steps in [160]:
-                for inference_batch_per_device in [32]:
-                    for ppo_minibatch in [16]:
+                for inference_batch_per_device in [20]:
+                    for ppo_minibatch in [64]:
                         for entropy_coef in [0.001, 0.0001, 0.0]:
                             for seed in [10, 20]:
                                 exp_name = f"{datetime.today().strftime('%Y%m%d')}_skill_conditioned_grpo_env_name={env_name}_num_steps={num_steps}_inference_batch_per_device={inference_batch_per_device}_ppo_minibatch={ppo_minibatch}_entropy_coef={entropy_coef}"

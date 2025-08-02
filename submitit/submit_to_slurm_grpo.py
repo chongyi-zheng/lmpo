@@ -61,8 +61,8 @@ def main():
     with executor.batch():  # job array
         for env_name in ['countdown']:
             for num_steps in [160]:
-                for inference_batch_per_device in [32]:
-                    for ppo_minibatch in [16]:  # 64
+                for inference_batch_per_device in [18]:
+                    for ppo_minibatch in [64]:  # 64
                         for entropy_coef in [0.001]:
                             for seed in [10, 20]:
                                 exp_name = f"{datetime.today().strftime('%Y%m%d')}_grpo_env_name={env_name}_num_steps={num_steps}_inference_batch_per_device={inference_batch_per_device}_ppo_minibatch={ppo_minibatch}_entropy_coef={entropy_coef}"
@@ -91,7 +91,7 @@ def main():
                                     export CUDA_VISIBLE_DEVICES=0,1,2,3;
                                     export WANDB_CACHE_DIR={log_root_dir}/.cache/wandb;
                                     source $HOME/env_vars.sh;
-                                    XLA_PYTHON_CLIENT_MEM_FRACTION=.90;
+                                    XLA_PYTHON_CLIENT_MEM_FRACTION=.95;
                                     
                                     rm -rf {log_dir};
                                     mkdir -p {log_dir};
