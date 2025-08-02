@@ -89,6 +89,7 @@ def main():
                                     export PYTHONPATH=$HOME/research/lmpo;
                                     export PATH="$PATH":"$CONDA_PREFIX"/bin;
                                     export CUDA_VISIBLE_DEVICES=0,1,2,3;
+                                    export WANDB_CACHE_DIR={log_root_dir}/.cache/wandb;
                                     source $HOME/env_vars.sh;
                                     XLA_PYTHON_CLIENT_MEM_FRACTION=.95;
                                     
