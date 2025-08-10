@@ -49,9 +49,10 @@ config = ml_collections.ConfigDict({
     # sampling settings.
     'inference_batch_per_device': 4,  # Set this to the maximum until OOM. Should not affect results.
     # training settings.
-    'num_steps': 150,
+    'num_steps': 120,
     'groups_per_batch': 64,  # global batch = groups_per_batch * group_size
     'ppo_minibatch': 64,
+    'grad_accum_steps': 8,
     'group_size': 8,  # GRPO group size.
     'do_group_normalization': 1,
     'do_global_normalization': 0,
@@ -64,6 +65,7 @@ config = ml_collections.ConfigDict({
 define_flag_dict(config)
 FLAGS = flags.FLAGS
 FLAGS(sys.argv)
+assert FLAGS.grad_accum_steps >= 1
 if jax.process_index() == 0:
     os.makedirs(FLAGS.save_dir, exist_ok=True)
     setup_wandb(FLAGS.flag_values_dict(),
@@ -113,8 +115,10 @@ def get_logprobs(train_state: TrainState, token_batch, mask):
     logprobs = jnp.sum(logprobs * jax.nn.one_hot(text_target, logits.shape[-1]), axis=-1)
     return logprobs
 
-@partial(jax.jit, out_shardings=(train_state_shard, None))
-def update(train_state: TrainState, token_batch, mask, advantages, old_logprobs):
+@partial(jax.jit, out_shardings=(train_state_shard, None, None))
+def update(train_state: TrainState,
+           token_batch, mask, advantages, old_logprobs,
+           grad_accum, micro_step):
     print("JIT compiling update function for token_batch of shape", token_batch.shape)
     text_input, text_target = token_batch[:, :-1], token_batch[:, 1:]
     mask = mask[:, 1:]
@@ -163,17 +167,47 @@ def update(train_state: TrainState, token_batch, mask, advantages, old_logprobs)
             'is_max_tokens': jnp.mean(mask[:, -1] == True),
         }
     grads, info = jax.grad(loss_fn, has_aux=True)(train_state.params)
-    updates, opt_state = train_state.tx.update(grads, train_state.opt_state, train_state.params)
-    new_params = optax.apply_updates(train_state.params, updates)
-    info['grad_norm'] = optax.global_norm(grads)
-    info['update_norm'] = optax.global_norm(updates)
-    info['param_norm'] = optax.global_norm(new_params)
-    train_state = train_state.replace(
-        params=new_params,
-        opt_state=opt_state,
-        step=train_state.step + 1,
+    info['grad_norm_micro'] = optax.global_norm(grads)
+
+    new_grad_accum = jax.tree.map(lambda a, g: a + g, grad_accum, grads)
+
+    def update_params(carry):
+        train_state, grad_acc = carry
+        grad_avg = jax.tree.map(lambda g: g / FLAGS.grad_accum_steps, grad_acc)
+        updates, opt_state = train_state.tx.update(grad_avg, train_state.opt_state, train_state.params)
+        new_params = optax.apply_updates(train_state.params, updates)
+        train_state = train_state.replace(
+            params=new_params,
+            opt_state=opt_state,
+            step=train_state.step + 1,
+        )
+        grad_acc = jax.tree.map(jnp.zeros_like, grad_acc)
+        # Log norms post update
+        update_info = {
+            'grad_norm': optax.global_norm(grad_avg),
+            'update_norm': optax.global_norm(updates),
+            'param_norm': optax.global_norm(new_params),
+        }
+        return train_state, grad_acc, update_info
+
+    def update_params_dummy(carry):
+        train_state, grad_acc = carry
+        grad_avg = jax.tree.map(lambda g: g / FLAGS.grad_accum_steps, grad_acc)
+        update_info = {
+            'grad_norm': optax.global_norm(grad_avg),
+            'update_norm': 0.0,
+            'param_norm': optax.global_norm(train_state.params),
+        }
+        return train_state, grad_acc, update_info
+
+    train_state, new_grad_accum, update_info = jax.lax.cond(
+        micro_step % FLAGS.grad_accum_steps == 0,
+        update_params,
+        update_params_dummy,
+        operand=(train_state, new_grad_accum),
     )
-    return train_state, info
+
+    return train_state, new_grad_accum, info
 
 rollout_batch_size = jax.local_device_count() * FLAGS.inference_batch_per_device
 assert rollout_batch_size % FLAGS.group_size == 0
@@ -284,16 +318,31 @@ for i in tqdm.tqdm(range(FLAGS.num_steps)):
     advantages_minibatch = ppo_shard(advantages)
     mask_minibatch = ppo_shard(mask)
 
+    num_minibatches = global_batch_size // FLAGS.ppo_minibatch
+
     # First, we do a forward pass to get prior logprobs for each token.
     logprobs_list = []
-    for j in range(global_batch_size // FLAGS.ppo_minibatch):
-        logprobs_minibatch = get_logprobs(train_state, tokens_all_minibatch[:, j], mask_minibatch[:, j])
+    for micro_step in range(num_minibatches):
+        logprobs_minibatch = get_logprobs(
+            train_state,
+            tokens_all_minibatch[:, micro_step],
+            mask_minibatch[:, micro_step]
+        )
         logprobs_list.append(logprobs_minibatch)
     logprobs_all_minibatch = jnp.stack(logprobs_list, axis=1)
 
+    grad_accum = jax.tree.map(jnp.zeros_like, train_state.params)
     # Then, the training loop.
-    for j in range(global_batch_size // FLAGS.ppo_minibatch):
-        train_state, info = update(train_state, tokens_all_minibatch[:, j], mask_minibatch[:, j], advantages_minibatch[:, j], logprobs_all_minibatch[:, j])
+    for micro_step in range(num_minibatches):
+        train_state, grad_accum, info = update(
+            train_state,
+            tokens_all_minibatch[:, micro_step],
+            mask_minibatch[:, micro_step],
+            advantages_minibatch[:, micro_step],
+            logprobs_all_minibatch[:, micro_step],
+            grad_accum,
+            micro_step,
+        )
         info = jax.device_get(info)
         info['output_tokens'] = eos_idx
         info = jax.tree.map(lambda x: np.array(x), info)
@@ -306,18 +355,63 @@ for i in tqdm.tqdm(range(FLAGS.num_steps)):
         info['time_per_rollout'] = rollout_total_time / (num_rollout_iters * rollout_batch_size * jax.process_count())
         info['time_per_effective_rollout'] = rollout_total_time / global_batch_size
         info['effective_rollout_ratio'] = global_batch_size / (rollout_batch_size * jax.process_count() * num_rollout_iters)
-        info['minibatches_per_global_step'] = global_batch_size // FLAGS.ppo_minibatch
+        info['minibatches_per_global_step'] = num_minibatches
         for k, v in env_infos_history.items():
             info['env/'+k] = np.mean(v)
         if jax.process_index() == 0:
             rollouts_list.append([i, env.render(new_states[0]), returns_local[0]])
             rollouts_table = wandb.Table(data=rollouts_list, columns=["step", "text", "reward"])
             info['rollouts_table'] = rollouts_table
-            if j == global_batch_size // FLAGS.ppo_minibatch - 1:
+            if micro_step == num_minibatches - 1:
                 print(f'=================== Iter {i} ===================')
                 for k, v in info.items():
                     if k not in ['rollouts_table']:
                         print(f"{k}: {v}")
+            wandb.log(info)
+
+    def update_params_final(train_state, grad_acc, remainder):
+        grad_avg = jax.tree.map(lambda g: g / remainder, grad_acc)
+        updates, opt_state = train_state.tx.update(grad_avg, train_state.opt_state, train_state.params)
+        new_params = optax.apply_updates(train_state.params, updates)
+        train_state = train_state.replace(
+            params=new_params,
+            opt_state=opt_state,
+            step=train_state.step + 1,
+        )
+        grad_acc = jax.tree.map(jnp.zeros_like, grad_acc)
+        # Log norms post update
+        update_info = {
+            'grad_norm': optax.global_norm(grad_avg),
+            'update_norm': optax.global_norm(updates),
+            'param_norm': optax.global_norm(new_params),
+        }
+        return train_state, grad_acc, update_info
+
+    # flush if we ended mid-accum window
+    if num_minibatches % FLAGS.grad_accum_steps != 0:
+        train_state, grad_accum, update_info_final = update_params_final(
+            train_state, grad_accum, num_minibatches % FLAGS.grad_accum_steps
+        )
+
+        info = jax.device_get(info)
+        info['output_tokens'] = eos_idx
+        info = jax.tree.map(lambda x: np.array(x), info)
+        info = jax.tree.map(lambda x: x.mean(), info)
+        info['total_rollouts'] = total_rollouts
+        if env.num_tasks != -1:
+            info['env_epochs'] = total_rollouts / env_num_tasks
+        info['rollout_iters_per_update'] = num_rollout_iters
+        info['global_step'] = i
+        info['time_per_rollout'] = rollout_total_time / (num_rollout_iters * rollout_batch_size * jax.process_count())
+        info['time_per_effective_rollout'] = rollout_total_time / global_batch_size
+        info['effective_rollout_ratio'] = global_batch_size / (rollout_batch_size * jax.process_count() * num_rollout_iters)
+        info['minibatches_per_global_step'] = num_minibatches
+        for k, v in env_infos_history.items():
+            info['env/'+k] = np.mean(v)
+        if jax.process_index() == 0:
+            rollouts_list.append([i, env.render(new_states[0]), returns_local[0]])
+            rollouts_table = wandb.Table(data=rollouts_list, columns=["step", "text", "reward"])
+            info['rollouts_table'] = rollouts_table
             wandb.log(info)
 
     if i % FLAGS.test_interval == 0 and env_test is not None:
