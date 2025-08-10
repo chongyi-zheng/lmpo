@@ -43,7 +43,7 @@ def main():
 
     executor = submitit.AutoExecutor(folder="/tmp/submitit_logs")  # this path is not actually used.
     executor.update_parameters(
-        slurm_name="grpo",
+        slurm_name="grpo_grad_acc",
         slurm_time=int(24 * 60),  # minute
         slurm_partition=partition,
         slurm_account=account,
@@ -68,7 +68,7 @@ def main():
                                 for seed in [10, 20]:
                                     exp_name = f"{datetime.today().strftime('%Y%m%d')}_grpo_env_name={env_name}_num_steps={num_steps}_inference_batch_per_device={inference_batch_per_device}_ppo_minibatch={ppo_minibatch}_grad_accum_steps={grad_accum_steps}_entropy_coef={entropy_coef}"
                                     log_dir = os.path.expanduser(
-                                        f"{log_root_dir}/exp_logs/jax_llm_logs/grpo/{exp_name}/{seed}")
+                                        f"{log_root_dir}/exp_logs/jax_llm_logs/grpo_grad_acc/{exp_name}/{seed}")
 
                                     # change the log folder of slurm executor
                                     submitit_log_dir = os.path.join(os.path.dirname(log_dir), 'submitit')
@@ -96,7 +96,7 @@ def main():
                                         
                                         rm -rf {log_dir};
                                         mkdir -p {log_dir};
-                                        python $PROJECT_DIR/core/grpo.py \
+                                        python $PROJECT_DIR/core/grpo_grad_acc.py \
                                             --env_name={env_name} \
                                             --test_env_name={env_name} \
                                             --model_dir=/scratch/gpfs/cz8792/language_models/models/Qwen--Qwen3-1.7B/jax_ckpts/ \
