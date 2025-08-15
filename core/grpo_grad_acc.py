@@ -115,10 +115,10 @@ def get_logprobs(train_state: TrainState, token_batch, mask):
     logprobs = jnp.sum(logprobs * jax.nn.one_hot(text_target, logits.shape[-1]), axis=-1)
     return logprobs
 
-@partial(jax.jit, out_shardings=(train_state_shard, None, None))
+@partial(jax.jit, out_shardings=(train_state_shard, None))
 def update(train_state: TrainState,
            token_batch, mask, advantages, old_logprobs,
-           grad_accum, micro_step):
+           micro_step):
     print("JIT compiling update function for token_batch of shape", token_batch.shape)
     text_input, text_target = token_batch[:, :-1], token_batch[:, 1:]
     mask = mask[:, 1:]
@@ -169,45 +169,49 @@ def update(train_state: TrainState,
     grads, info = jax.grad(loss_fn, has_aux=True)(train_state.params)
     info['grad_norm_micro'] = optax.global_norm(grads)
 
-    new_grad_accum = jax.tree.map(lambda a, g: a + g, grad_accum, grads)
-
     def update_params(carry):
-        train_state, grad_acc = carry
-        grad_avg = jax.tree.map(lambda g: g / FLAGS.grad_accum_steps, grad_acc)
+        train_state, grads = carry
+        new_grad_accum = jax.tree.map(lambda a, g: a + g, train_state.grad_accum, grads)
+        grad_avg = jax.tree.map(lambda g: g / FLAGS.grad_accum_steps, new_grad_accum)
         updates, opt_state = train_state.tx.update(grad_avg, train_state.opt_state, train_state.params)
         new_params = optax.apply_updates(train_state.params, updates)
         train_state = train_state.replace(
             params=new_params,
             opt_state=opt_state,
             step=train_state.step + 1,
+            grad_accum=jax.tree.map(jnp.zeros_like, grad_avg),
         )
-        grad_acc = jax.tree.map(jnp.zeros_like, grad_acc)
+        # grad_acc = jax.tree.map(jnp.zeros_like, grad_acc)
         # Log norms post update
         update_info = {
             'grad_norm': optax.global_norm(grad_avg),
             'update_norm': optax.global_norm(updates),
             'param_norm': optax.global_norm(new_params),
         }
-        return train_state, grad_acc, update_info
+        return train_state, update_info
 
     def update_params_dummy(carry):
-        train_state, grad_acc = carry
-        grad_avg = jax.tree.map(lambda g: g / FLAGS.grad_accum_steps, grad_acc)
+        train_state, grads = carry
+        new_grad_accum = jax.tree.map(lambda a, g: a + g, train_state.grad_accum, grads)
+        grad_avg = jax.tree.map(lambda g: g / FLAGS.grad_accum_steps, new_grad_accum)
+        train_state = train_state.replace(
+            grad_accum=new_grad_accum,
+        )
         update_info = {
             'grad_norm': optax.global_norm(grad_avg),
             'update_norm': 0.0,
             'param_norm': optax.global_norm(train_state.params),
         }
-        return train_state, grad_acc, update_info
+        return train_state, update_info
 
-    train_state, new_grad_accum, update_info = jax.lax.cond(
+    train_state, update_info = jax.lax.cond(
         micro_step % FLAGS.grad_accum_steps == 0,
         update_params,
         update_params_dummy,
-        operand=(train_state, new_grad_accum),
+        operand=(train_state, grads),
     )
 
-    return train_state, new_grad_accum, info
+    return train_state, info
 
 rollout_batch_size = jax.local_device_count() * FLAGS.inference_batch_per_device
 assert rollout_batch_size % FLAGS.group_size == 0
@@ -233,7 +237,8 @@ for i in tqdm.tqdm(range(FLAGS.num_steps)):
             env_task_idx = env_task_idx % env_num_tasks
             for _ in range(FLAGS.group_size):
                 env_msg = tokenizer.decode(output_tokens)
-                env_msg = env_msg.replace("<strategy> None </strategy>", "")
+                env_msg = env_msg.replace(" You can follow the strategy in the <strategy> </strategy> tag.", "")
+                env_msg = env_msg.replace(" <strategy> None </strategy>", "")
                 new_env_tokens = tokenizer.encode(env_msg)
                 new_env_state = replace(env_state, tokens=new_env_tokens)
 
@@ -331,16 +336,16 @@ for i in tqdm.tqdm(range(FLAGS.num_steps)):
         logprobs_list.append(logprobs_minibatch)
     logprobs_all_minibatch = jnp.stack(logprobs_list, axis=1)
 
-    grad_accum = jax.tree.map(jnp.zeros_like, train_state.params)
+    # grad_accum = jax.tree.map(jnp.zeros_like, train_state.params)
     # Then, the training loop.
     for micro_step in range(num_minibatches):
-        train_state, grad_accum, info = update(
+        train_state, info = update(
             train_state,
             tokens_all_minibatch[:, micro_step],
             mask_minibatch[:, micro_step],
             advantages_minibatch[:, micro_step],
             logprobs_all_minibatch[:, micro_step],
-            grad_accum,
+            # grad_accum,
             micro_step,
         )
         info = jax.device_get(info)
@@ -369,28 +374,30 @@ for i in tqdm.tqdm(range(FLAGS.num_steps)):
                         print(f"{k}: {v}")
             wandb.log(info)
 
-    def update_params_final(train_state, grad_acc, remainder):
-        grad_avg = jax.tree.map(lambda g: g / remainder, grad_acc)
+    @partial(jax.jit, )
+    def update_params_final(train_state, remainder):
+        grad_avg = jax.tree.map(lambda g: g / remainder, train_state.grad_accum)
         updates, opt_state = train_state.tx.update(grad_avg, train_state.opt_state, train_state.params)
         new_params = optax.apply_updates(train_state.params, updates)
         train_state = train_state.replace(
             params=new_params,
             opt_state=opt_state,
             step=train_state.step + 1,
+            grad_accum=jax.tree.map(jnp.zeros_like, grad_avg)
         )
-        grad_acc = jax.tree.map(jnp.zeros_like, grad_acc)
+        # grad_acc = jax.tree.map(jnp.zeros_like, grad_acc)
         # Log norms post update
         update_info = {
             'grad_norm': optax.global_norm(grad_avg),
             'update_norm': optax.global_norm(updates),
             'param_norm': optax.global_norm(new_params),
         }
-        return train_state, grad_acc, update_info
+        return train_state, update_info
 
     # flush if we ended mid-accum window
     if num_minibatches % FLAGS.grad_accum_steps != 0:
-        train_state, grad_accum, update_info_final = update_params_final(
-            train_state, grad_accum, num_minibatches % FLAGS.grad_accum_steps
+        train_state, update_info_final = update_params_final(
+            train_state, num_minibatches % FLAGS.grad_accum_steps
         )
 
         info = jax.device_get(info)

@@ -199,7 +199,8 @@ for i in tqdm.tqdm(range(FLAGS.num_steps)):
             env_task_idx = env_task_idx % env_num_tasks
             for _ in range(FLAGS.group_size):
                 env_msg = tokenizer.decode(output_tokens)
-                env_msg = env_msg.replace("<strategy> None </strategy>", "")
+                env_msg = env_msg.replace(" You can follow the strategy in the <strategy> </strategy> tag.", "")
+                env_msg = env_msg.replace(" <strategy> None </strategy>", "")
                 new_env_tokens = tokenizer.encode(env_msg)
                 new_env_state = replace(env_state, tokens=new_env_tokens)
 

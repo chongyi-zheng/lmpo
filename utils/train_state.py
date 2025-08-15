@@ -6,6 +6,7 @@
 
 import flax
 import jax
+import jax.numpy as jnp
 import functools
 from typing import Any, Callable
 
@@ -19,6 +20,7 @@ class TrainState(flax.struct.PyTreeNode):
     model_def: Any = nonpytree_field()
     params: Any
     params_ema: Any
+    grad_accum: Any
     tx: Any = nonpytree_field()
     opt_state: Any
     use_ema: bool = False
@@ -28,8 +30,10 @@ class TrainState(flax.struct.PyTreeNode):
         params = model_def.init(rng, *model_input)['params']
         opt_state = tx.init(params)
         params_ema = params if use_ema else None
+        grad_accum = jax.tree.map(jnp.zeros_like, params)
         return cls(
-            rng=rng, step=1, apply_fn=model_def.apply, model_def=model_def, params=params, params_ema=params_ema,
+            rng=rng, step=1, apply_fn=model_def.apply, model_def=model_def,
+            params=params, params_ema=params_ema, grad_accum=grad_accum,
             tx=tx, opt_state=opt_state, **kwargs,
         )
     
@@ -37,8 +41,10 @@ class TrainState(flax.struct.PyTreeNode):
     def create_with_params(cls, rng, model_def, params, tx, use_ema=False, **kwargs):
         opt_state = tx.init(params)
         params_ema = params if use_ema else None
+        grad_accum = jax.tree.map(jnp.zeros_like, params)
         return cls(
-            rng=rng, step=1, apply_fn=model_def.apply, model_def=model_def, params=params, params_ema=params_ema,
+            rng=rng, step=1, apply_fn=model_def.apply, model_def=model_def,
+            params=params, params_ema=params_ema, grad_accum=grad_accum,
             tx=tx, opt_state=opt_state, **kwargs,
         )
 
