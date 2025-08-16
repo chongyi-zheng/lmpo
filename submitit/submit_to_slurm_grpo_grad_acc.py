@@ -61,7 +61,7 @@ def main():
     with executor.batch():  # job array
         for env_name in ['countdown']:
             for num_steps in [160]:
-                for inference_batch_per_device in [36]:
+                for inference_batch_per_device in [18]:
                     for ppo_minibatch in [64]:  # 64
                         for grad_accum_steps in [8]:
                             for entropy_coef in [0.001]:
