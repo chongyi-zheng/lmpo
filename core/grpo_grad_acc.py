@@ -400,7 +400,7 @@ for i in tqdm.tqdm(range(FLAGS.num_steps)):
             train_state, num_minibatches % FLAGS.grad_accum_steps
         )
 
-        info = jax.device_get(info)
+        info = jax.device_get(update_info_final)
         info['output_tokens'] = eos_idx
         info = jax.tree.map(lambda x: np.array(x), info)
         info = jax.tree.map(lambda x: x.mean(), info)
